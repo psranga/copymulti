@@ -1,0 +1,20 @@
+#!/bin/bash
+
+MYDIR=$(dirname "$0")
+# cherry remotes: $(git remote | grep cherryremote_)
+# mono main branch: $(git branch -a | grep -v remote | egrep -o '(main|master)')
+# new commits = git log <cherry remotes> ^<mono main branch>
+
+MSGNEEDLE="cherry picked from commit"
+python $MYDIR/must-cherry-pick.py \
+  <(git log --format='%H' $(git remote | grep cherryremote_) ^$(git branch -a | grep -v remote | egrep -o '(main|master)')) \
+  <(git log --grep="$MSGNEEDLE" master | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')') | \
+    tac | \
+      git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+
+#python $MYDIR/must-cherry-pick.py <(git log --format='%H' repoa/master repob/master repoc/master ^master) \
+#  <(git log --grep='cherry picked from commit' master | grep 'cherry picked from commit' | egrep -o '[0-9a-z]+\)$' | tr -d ')') | \
+#  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+
+# using tee
+# python ~/wip/copymulti/must-cherry-pick.py <(git log --format='%H' repoa/master repob/master repoc/master ^master) <(git log --grep='cherry picked from commit' master | grep 'cherry picked from commit' | egrep -o '[0-9a-z]+\)$' | tr -d ')') | tee >(git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin 2>&1)
