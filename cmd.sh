@@ -1,7 +1,7 @@
 git config --global alias.cherryadd '!f() { for url in $*; do fn=cherryremote_$(basename "$url"); git remote add "$fn" "$url" && git fetch "$fn" && git remote set-head "$fn" $(git branch -a | egrep -o "remotes/$fn/(main|master)" | xargs basename); done; }; f'
 git config --global alias.cherryrm '!f() { for url in $*; do fn=cherryremote_$(basename "$url"); git remote rm "$fn"; done; }; f'
 
-git config --global alias.cherrytodo '!f() { git log --format="%H" $(git remote | grep cherryremote_) ^$(git branch | grep -Eo "(main|master)") --; }; f'
+git config --global alias.cherrymaybetodo '!f() { git log --format="%H" $(git remote | grep cherryremote_) ^$(git branch | grep -Eo "(main|master)") --; }; f'
 git config --global alias.cherryfetch '!f() { for fn in $(git remote | grep cherryremote_); do git fetch $fn; done; }; f'
 
 git config --global alias.cherryvfetch '!f() { git cherryfetch; git cherrytodo; }; f'

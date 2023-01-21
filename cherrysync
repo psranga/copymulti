@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# cherry-pick todo commits into local main branch.
+# bail if current HEAD is not main branch.
+#  git symbolic-ref HEAD =~ refs/heads/(master|main)
+# bail if index and working tree are unclean.
+#  git status --porcelain 2>&1 | wc -c | tr -d ' '
+# git stash push
+# git cherryfetch
+# git cherrytodo
+# cherrypull.sh
+# git stash pop
+
+MYDIR=$(dirname "$0")
+MYBRANCH=$(git symbolic-ref HEAD)
+if [[ "$MYBRANCH" != "refs/heads/main" && "$MYBRANCH" != "refs/heads/master" ]]; then
+  echo "Switch to the main branch and rerun this command. I got $MYBRANCH.";
+  exit 1;
+fi
+
+echo "OK. On the main branch ($MYBRANCH).";
+
+
+has_pending_changes () {
+  git status | grep -q 'Changes not staged for commit:'
+}
+
+has_pending_changes && \
+  {
+    echo
+    echo ====================
+    # paste is to indent the output of git status.
+    paste /dev/null <(git status) | sed -E -e 's/\t/    /g';
+    echo ====================
+    echo
+    echo "Changes to tracked files in workdir or index? Commit/stash/reset and retry this command.";
+    exit 1;
+  } ||
+  echo "OK. No pending changes to tracked files."
+
+set -e
+
+echo "OK. Fetching from cherry remotes."
+git cherryfetch
+
+listunpicked () {
+  MSGNEEDLE="cherry picked from commit"
+  python $MYDIR/must-cherry-pick.py \
+    <(git log --format='%H' $(git remote | grep cherryremote_) ^$(git branch -a | grep -v remote | egrep -o '(main|master)')) \
+    <(git log --grep="$MSGNEEDLE" master | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')')
+}
+
+echo
+echo "OK. Computing unsync'd commits:"
+listunpicked | tac
+echo
+
+echo "OK. Cherry-picking unsync'd commits:"
+listunpicked | tac | \
+  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+
+set +e
+
