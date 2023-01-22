@@ -11,11 +11,24 @@
 # cherrypull.sh
 # git stash pop
 
+# 'wc -l' and removes the leading whitespace.
+lines_in_file () {
+  ifn="$1"
+  wc -l < "$ifn"  | tr -d ' '
+}
+
+# paste creates indents with a tab. sed converts the tab to spaces.
+cat_indented () {
+  paste /dev/null "$1" | sed -E -e 's/^\t/    /g';
+}
+
 gitroot () {
   git rev-parse --show-toplevel
 }
 
 #MYDIR=$(dirname "$0")
+# Convention: store these scripts in the parent of the repo. Or Maybe within
+# 00MONO?
 MYDIR=$(dirname $(gitroot))
 
 current_branch () {
@@ -44,8 +57,7 @@ exit_if_pending_changes () {
     {
       echo
       echo ====================
-      # paste is to indent the output of git status.
-      paste /dev/null <(git status) | sed -E -e 's/\t/    /g';
+      cat_indented <(git status)
       echo ====================
       echo
       echo "Changes to tracked files in workdir or index? Commit/stash/reset and retry this command.";
@@ -63,6 +75,12 @@ listunpicked () {
 
 stagingdir () {
   echo $(gitroot)/00MONO
+}
+
+stagingtmpdir () {
+  path="$(stagingdir)/tmp"
+  [[ -d "$path" ]] || mkdir -p "$path"
+  echo $path
 }
 
 monodir () {
@@ -100,16 +118,6 @@ main_branch_of_staged_subrepo () {
 remotename_of_subrepo () {
   url="$1"
   echo "cherryremote_"$(url_to_reponame $url)
-}
-
-monocommits_to_stage_for_subrepo () {
-  url="$1"
-  echo "Computing monocommits to be staged for subrepo: $url"
-
-  echo git -C "$(monodir)" rev-list --grep="cherry picked from commit" --invert-grep \
-    HEAD ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
-  git -C "$(monodir)" rev-list --grep="cherry picked from commit" --invert-grep \
-    HEAD ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
 }
 
 reset_mono_and_subrepos_to_main_branch () {
@@ -193,7 +201,7 @@ checkout_subrepo_in_staging() {
   }
 
   # TODO: git cherryclonesubrepo "$url"
-  git -C "$(stagingdir)" clone "$url" "$fn";
+  git -C "$(stagingdir)" clone --origin "subrepo_actual_origin" "$url" "$fn";
 
   # TODO: git cherry_link_mono_to_subrepo "$url"
   git -C "$gitdir" remote add cherryremote_monorepo $(monodir)
@@ -230,11 +238,17 @@ reset_to_branch_in_staged_subrepo () {
   }
 
   gitdir_has_branch "$gitdir" "$br" || {
-    echo "Creating tracked local branch $br in subrepo $url (gitdir: $gitdir)";
-    git -C "$gitdir" checkout -f -B "$br" "$mainbr"
+    echo "Starting tracked local branch $br in subrepo $url at origin's HEAD (gitdir: $gitdir)";
+    git -C "$gitdir" checkout -f -B "$br" "subrepo_actual_origin/HEAD"
+    echo "Pushing local branch $br in subrepo $url to origin (gitdir: $gitdir)";
+    git -C "$gitdir" push -u -f "$br" "subrepo_actual_origin"
   }
 
-  git -C "$(reponame_to_stagingrepodir "$fn")" reset --hard "$br"
+  echo "Checking out origin branch from subrepo $url as local branch (gitdir: $gitdir)";
+  git -C "$gitdir" checkout -f -B "$br" "subrepo_actual_origin/$br"
+
+  git -C "$gitdir" reset --hard "subrepo_actual_origin/$br"
+  git -C "$gitdir" fetch cherryremote_monorepo
   #git -C "$(reponame_to_stagingrepodir "$fn")" pull -f origin
 }
 
@@ -262,6 +276,52 @@ reset_all_subrepos_in_staging_to_branch () {
   done
 }
 
+# ======================================
+
+# br should be a feature branch.
+monocommits_to_stage_for_subrepo () {
+  url="$1"
+  br="$2"
+
+  git -C "$(monodir)" rev-list --grep="cherry picked from commit" --invert-grep \
+    "$br" ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
+}
+
+write_monocommits_to_stage_for_subrepo () {
+  url="$1"
+  br="$2"
+  ofile="$3"
+  echo "Computing monocommits in (fbranch) $br to be staged for subrepo: $url"
+
+  monocommits_to_stage_for_subrepo "$url" "$br" > $ofile
+}
+
+apply_monocommits_to_staged_subrepo () {
+  url="$1"
+  br="$2"
+  ifile="$3"
+
+  fn=$(url_to_reponame "$url")
+  gitdir=$(reponame_to_stagingrepodir "$fn")
+  monogitdir=$(monodir)
+
+  echo "Applying $(lines_in_file "$ifile") monocommits from branch $br to staged subrepo $url branch $br (gitdir: $gitdir)"
+  while read -r commitid; do
+    echo;
+    echo "Applying commit: $commitid";
+    TMPPATCH="$(stagingtmpdir)/patch.${br}.${fn}.${commitid}"
+    TMPLOGMSG="$(stagingtmpdir)/logmsg.${br}.${fn}.${commitid}"
+    git -C "$monogitdir" rev-list --pretty='format:%B' "${commitid}^..${commitid}" > "$TMPLOGMSG"
+    git -C "$monogitdir" format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
+      > "$TMPPATCH"
+    echo "Patch is in: $TMPPATCH; Log message in: $TMPLOGMSG"
+    echo
+    cat_indented "$TMPPATCH"
+  done < "$ifile"
+}
+
+# =============================================
+
 main_doit() {
   MYBRANCH=$(current_branch)
 
@@ -276,18 +336,38 @@ main_doit() {
 
   echo "OK. Resetting to origin's feature branch in subrepos."
 
-  set -e
-  set -x
-
   # First hard-reset all subrepos to origin version of feature branch.
   # creating the branch if needed.
   reset_all_subrepos_in_staging_to_branch "$MYBRANCH"
 
   for url in $(all_subrepo_urls); do
-    monocommits_to_stage_for_subrepo "$url" "$MYBRANCH"
+    echo
+    echo "Computing monocommits in fbranch $MYBRANCH that should be staged for subrepo $url"
+
+    fn=$(url_to_reponame "$url")
+    TMPTODOCOMMITS="$(stagingtmpdir)/todocommits.${MYBRANCH}.${fn}"
+    echo "Todo commits should be in: $TMPTODOCOMMITS"
+
+    #set -e
+    #set -x
+
+    write_monocommits_to_stage_for_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS" || {
+      echo "Error computing monocommits in fbranch $MYBRANCH that should be staged for subrepo $url" >&2
+      break
+    }
+
+    echo "Found $(lines_in_file "$TMPTODOCOMMITS") commits from monofbranch $br for reponame $fn (subrepo: $url)"
+    cat_indented "$TMPTODOCOMMITS"
+
+    # By this time, we should have done 'git fetch' on the staged repos.
+    apply_monocommits_to_staged_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS"
+
+    #set +e
+    #set +x
   done
 
-  exit 0;
+  true;
+  return
 
   echo
   echo "OK. Computing unsync'd commits:"
