@@ -1,0 +1,232 @@
+#!/bin/bash
+
+# cherry-pick todo commits into local main branch.
+# bail if current HEAD is main branch.
+#  git symbolic-ref HEAD =~ refs/heads/(master|main)
+# bail if index and working tree are unclean.
+#  git status --porcelain 2>&1 | wc -c | tr -d ' '
+# git stash push
+# git cherryfetch
+# git cherrytodo
+# cherrypull.sh
+# git stash pop
+
+MYDIR=$(dirname "$0")
+
+current_branch () {
+  git branch --show-current
+}
+
+is_main_branch () {
+  br="$1"
+  [[ "$br" = "main" || "$br" == "master" ]];
+}
+
+find_main_branch () {
+  git branch -a | grep -v remote | egrep -o '(main|master)' | head -n 1
+}
+
+find_main_branch_in_dir () {
+  git -C "$1" branch -a | grep -v remote | egrep -o '(main|master)' | head -n 1
+}
+
+has_pending_changes () {
+  git status | grep -q 'Changes not staged for commit:'
+}
+
+exit_if_pending_changes () {
+  has_pending_changes && \
+    {
+      echo
+      echo ====================
+      # paste is to indent the output of git status.
+      paste /dev/null <(git status) | sed -E -e 's/\t/    /g';
+      echo ====================
+      echo
+      echo "Changes to tracked files in workdir or index? Commit/stash/reset and retry this command.";
+      exit 1;
+    } ||
+    echo "OK. No pending changes to tracked files."
+}
+
+listunpicked () {
+  MSGNEEDLE="cherry picked from commit"
+  python $MYDIR/must-cherry-pick.py \
+    <(git log --format='%H' $(git remote | grep cherryremote_) ^$(git branch -a | grep -v remote | egrep -o '(main|master)')) \
+    <(git log --grep="$MSGNEEDLE" master | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')')
+}
+
+MYBRANCH=$(current_branch)
+
+if is_main_branch "$MYBRANCH"; then
+  echo "Switch to the feature branch and rerun this command. I got $MYBRANCH.";
+  exit 1;
+fi
+
+echo "OK. On a feature branch ($MYBRANCH).";
+
+exit_if_pending_changes
+
+set -e
+
+echo "OK. Checking out or creating feature branch in subrepos."
+
+
+gitroot () {
+  git rev-parse --show-toplevel
+}
+
+stagingdir () {
+  echo $(gitroot)/00MONO
+}
+
+monodir () {
+  gitroot
+}
+
+all_subrepo_urls() {
+  git remote -v | grep cherryremote_ | grep fetch | cut -f 2 | cut -f 1 -d ' ' | sort
+}
+
+# ===============================
+
+# the directory under which a url should be checkout.
+# ls 00MONO, ls.
+url_to_reponame () {
+  basename "$1"
+}
+
+# the name of the remote for a url (git remote -v).
+# e.g., ../somewhere/a -> cherryremote_a
+url_to_remotename () {
+  echo "cherryremote_"/$(url_to_reponame "$1")
+}
+
+reponame_to_stagingrepodir () {
+  echo "$(stagingdir)"/"$1"
+}
+
+main_branch_of_staged_subrepo () {
+  url="$1"
+  fn=$(url_to_reponame "$url")
+  find_main_branch_in_dir "$(reponame_to_stagingrepodir "$fn")"
+}
+
+remotename_of_subrepo () {
+  url="$1"
+  echo "cherryremote_"$(url_to_reponame $url)
+}
+
+monocommits_to_stage_for_subrepo () {
+  url="$1"
+  echo "Computing monocommits to be staged for subrepo: $url"
+
+  echo git -C "$(monodir)" rev-list --grep="cherry picked from commit" --invert-grep \
+    HEAD ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
+  git -C "$(monodir)" rev-list --grep="cherry picked from commit" --invert-grep \
+    HEAD ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
+}
+
+checkout_subrepo_in_staging() {
+  url="$1"
+  br="$2"  # ignored
+  echo "Initial check of subrepo in staging: $url"
+
+  fn=$(url_to_reponame "$url")
+  git -C "$(stagingdir)" clone "$url" "$fn";
+}
+
+# Feature branches always start from the local HEAD of the subrepo's main branch.
+create_branch_in_staged_subrepo () {
+  url="$1"
+  br="$2"
+  echo "Creating branch $br in staging: $url"
+
+  fn=$(url_to_reponame "$url")
+  git -C "$(reponame_to_stagingrepodir "$fn")" checkout -f -B "$br" $(main_branch_of_staged_subrepo "$url")
+  # create the branch on the remote.
+  git -C "$(reponame_to_stagingrepodir "$fn")" push -f -u origin "$br"
+}
+
+pull_branch_in_staging () {
+  url="$1"
+  br="$2"
+  echo "Pulling branch $br of subrepo in staging: $url"
+
+  fn=$(url_to_reponame "$url")
+  gitdir=$(reponame_to_stagingrepodir "$fn")
+
+  [[ -z "$br" ]] && {
+    br=$(find_main_branch_in_dir "$gitdir");
+    echo "Inferred main branch: $br";
+  }
+  [[ -z "$br" ]] && { echo "No branch to pull to: /$br/" >&2; exit 1; }
+
+  git -C "$(reponame_to_stagingrepodir "$fn")" reset --hard origin/"$br"
+  git -C "$(reponame_to_stagingrepodir "$fn")" pull -f origin
+}
+
+reset_subrepo_in_staging_to_branch () {
+  url="$1"
+  br="$2"
+  fn=$(url_to_reponame "$url")
+  [[ -d $(reponame_to_stagingrepodir "$fn") ]] && \
+    pull_branch_in_staging "$url" "$br" || {
+      checkout_subrepo_in_staging "$url" "$br"
+      create_branch_in_staged_subrepo "$url" "$br"
+    }
+}
+
+# br == "" means use the main branch. TBD if that should be the contract.
+reset_all_subrepos_in_staging_to_branch () {
+  br="$1"
+  for url in $(all_subrepo_urls); do
+    reset_subrepo_in_staging_to_branch "$url" "$br"
+  done
+}
+
+
+reset_mono_and_subrepos_to_main_branch () {
+  exit_if_pending_changes
+
+  # reset to main branch in monorepo
+  git reset --hard $(find_main_branch)
+
+  # for each staged subrepo, reset to its main branch.
+  for url in $(all_subrepo_urls); do
+    fn=$(url_to_reponame "$url")
+    br=$(find_main_branch_in_dir $(reponame_to_stagingrepodir "$fn"))
+    reset_subrepo_in_staging_to_branch "$url" "$br"
+  done
+}
+
+new_feature_branch () {
+  exit_if_pending_changes
+
+  reset_mono_and_subrepos_to_main_branch
+
+  # reset to main branch in monorepo
+  # for each staged subrepo, reset to its main branch.
+  # git checkout -b $fb HEAD
+  # for each staged subrepo, git checkout -b $fb HEAD
+}
+
+reset_all_subrepos_in_staging_to_branch "$MYBRANCH"
+
+for url in $(all_subrepo_urls); do
+  monocommits_to_stage_for_subrepo "$url" "$fbr"
+done
+
+exit 0;
+
+echo
+echo "OK. Computing unsync'd commits:"
+listunpicked | tac
+echo
+
+echo "OK. Cherry-picking unsync'd commits:"
+listunpicked | tac | \
+  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+
+set +e
+
