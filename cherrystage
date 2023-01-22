@@ -66,6 +66,20 @@ exit_if_pending_changes () {
     echo "OK. No pending changes to tracked files."
 }
 
+return_if_pending_changes () {
+  has_pending_changes && \
+    {
+      echo
+      echo ====================
+      cat_indented <(git status)
+      echo ====================
+      echo
+      echo "Changes to tracked files in workdir or index? Commit/stash/reset and retry this command.";
+      return 1;
+    } ||
+    echo "OK. No pending changes to tracked files."
+}
+
 listunpicked () {
   MSGNEEDLE="cherry picked from commit"
   python $MYDIR/must-cherry-pick.py \
@@ -216,6 +230,12 @@ checkout_subrepo_in_staging() {
   reset_subrepo_in_staging_to_branch "$url" "$br";
 }
 
+gitdir_subrepo_origin_has_branch() {
+  gitdir="$1"
+  br="$2"
+  git -C "$gitdir" branch -r | grep -q " remotes/subrepo_actual_origin/$br$"
+}
+
 reset_to_branch_in_staged_subrepo () {
   url="$1"
   br="$2"
@@ -228,7 +248,7 @@ reset_to_branch_in_staged_subrepo () {
 
   [[ -z "$mainbr" ]] && {
     echo "No main branch in subrepo $url!!!" >&2;
-    exit 1;
+    #exit 1;
     return 1;
   }
 
@@ -237,11 +257,11 @@ reset_to_branch_in_staged_subrepo () {
     br="$mainbr"
   }
 
-  gitdir_has_branch "$gitdir" "$br" || {
+  gitdir_subrepo_origin_has_branch "$gitdir" "$br" || {
     echo "Starting tracked local branch $br in subrepo $url at origin's HEAD (gitdir: $gitdir)";
     git -C "$gitdir" checkout -f -B "$br" "subrepo_actual_origin/HEAD"
-    echo "Pushing local branch $br in subrepo $url to origin (gitdir: $gitdir)";
-    git -C "$gitdir" push -u -f "$br" "subrepo_actual_origin"
+    echo "Pushing local branch $br in subrepo $url to its origin (gitdir: $gitdir)";
+    git -C "$gitdir" push -u -f "subrepo_actual_origin" "$br"
   }
 
   echo "Checking out origin branch from subrepo $url as local branch (gitdir: $gitdir)";
@@ -309,30 +329,69 @@ apply_monocommits_to_staged_subrepo () {
   while read -r commitid; do
     echo;
     echo "Applying commit: $commitid";
-    TMPPATCH="$(stagingtmpdir)/patch.${br}.${fn}.${commitid}"
-    TMPLOGMSG="$(stagingtmpdir)/logmsg.${br}.${fn}.${commitid}"
-    git -C "$monogitdir" rev-list --pretty='format:%B' "${commitid}^..${commitid}" > "$TMPLOGMSG"
+    TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${br}.${fn}.${commitid}.XXXXXX")
+    TMPLOGMSG=$(mktemp "$(stagingtmpdir)/logmsg.${br}.${fn}.${commitid}.XXXXX")
+    # -n +2 removes the first "commit <id>" line.
+    git -C "$monogitdir" rev-list --pretty='format:%B' "${commitid}^..${commitid}" | \
+      tail -n +2 > "$TMPLOGMSG"
+    echo >> "$TMPLOGMSG"
+    echo >> "$TMPLOGMSG" "(from cherrystaged monocommit $commitid for fbranch $br)"
+
+    # Generate the patch.
     git -C "$monogitdir" format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
       > "$TMPPATCH"
-    echo "Patch is in: $TMPPATCH; Log message in: $TMPLOGMSG"
+
+    echo "Patch is in: $TMPPATCH"
+    echo "Log message is in: $TMPLOGMSG"
     echo
     cat_indented "$TMPPATCH"
+
+    # Apply the patch.
+    cat "$TMPPATCH" | git -C "$gitdir" am --include "$fn/*" && {
+      # TODO: check that the HEAD in the dir is actually different from before.
+      echo "Success! Applied monocommit $commitid fbranch $br onto staged subrepo $url (gitdir: $gitdir)"
+    } || {
+      echo "Error applying commit: ${commitid} onto staged subrepo $url (gitdir: $gitdir)"
+      echo "Cleaning git am to continue to next commits."
+      git -C "$gitdir" am --abort
+      continue
+    }
+
+    # Link staged commit with monocommit via suffix in commit message (like git cherry-pick -x).
+    git -C "$gitdir" commit --amend -F "$TMPLOGMSG" && {
+      echo "Edited commit message to link the staged commit to monocommit $commitid in subrepo $url branch $br (gitdir: $gitdir)"
+    } || {
+      echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
+      continue
+    }
   done < "$ifile"
 }
 
 # =============================================
 
-main_doit() {
+is_within_monodir () {
+  [[ -d "$(stagingdir)" ]]
+}
+
+cherry_stage () {
   MYBRANCH=$(current_branch)
+
+  is_within_monodir || {
+    echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
+    return 1;
+  }
 
   if is_main_branch "$MYBRANCH"; then
     echo "Switch to the feature branch and rerun this command. I got $MYBRANCH.";
-    exit 1;
+    return 1;
   fi
 
   echo "OK. On a feature branch ($MYBRANCH).";
 
-  exit_if_pending_changes
+  has_pending_changes && {
+    echo "Unclean working dir or index." >&2
+    return 1;
+  }
 
   echo "OK. Resetting to origin's feature branch in subrepos."
 
@@ -348,9 +407,6 @@ main_doit() {
     TMPTODOCOMMITS="$(stagingtmpdir)/todocommits.${MYBRANCH}.${fn}"
     echo "Todo commits should be in: $TMPTODOCOMMITS"
 
-    #set -e
-    #set -x
-
     write_monocommits_to_stage_for_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS" || {
       echo "Error computing monocommits in fbranch $MYBRANCH that should be staged for subrepo $url" >&2
       break
@@ -361,22 +417,5 @@ main_doit() {
 
     # By this time, we should have done 'git fetch' on the staged repos.
     apply_monocommits_to_staged_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS"
-
-    #set +e
-    #set +x
   done
-
-  true;
-  return
-
-  echo
-  echo "OK. Computing unsync'd commits:"
-  listunpicked | tac
-  echo
-
-  echo "OK. Cherry-picking unsync'd commits:"
-  listunpicked | tac | \
-    git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
-
-  set +e
 }
