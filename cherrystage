@@ -11,7 +11,12 @@
 # cherrypull.sh
 # git stash pop
 
-MYDIR=$(dirname "$0")
+gitroot () {
+  git rev-parse --show-toplevel
+}
+
+#MYDIR=$(dirname "$0")
+MYDIR=$(dirname $(gitroot))
 
 current_branch () {
   git branch --show-current
@@ -22,7 +27,7 @@ is_main_branch () {
   [[ "$br" = "main" || "$br" == "master" ]];
 }
 
-find_main_branch () {
+find_main_branch_of_monorepo () {
   git branch -a | grep -v remote | egrep -o '(main|master)' | head -n 1
 }
 
@@ -54,26 +59,6 @@ listunpicked () {
   python $MYDIR/must-cherry-pick.py \
     <(git log --format='%H' $(git remote | grep cherryremote_) ^$(git branch -a | grep -v remote | egrep -o '(main|master)')) \
     <(git log --grep="$MSGNEEDLE" master | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')')
-}
-
-MYBRANCH=$(current_branch)
-
-if is_main_branch "$MYBRANCH"; then
-  echo "Switch to the feature branch and rerun this command. I got $MYBRANCH.";
-  exit 1;
-fi
-
-echo "OK. On a feature branch ($MYBRANCH).";
-
-exit_if_pending_changes
-
-set -e
-
-echo "OK. Checking out or creating feature branch in subrepos."
-
-
-gitroot () {
-  git rev-parse --show-toplevel
 }
 
 stagingdir () {
@@ -127,17 +112,22 @@ monocommits_to_stage_for_subrepo () {
     HEAD ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
 }
 
-checkout_subrepo_in_staging() {
-  url="$1"
-  br="$2"  # ignored
-  echo "Initial check of subrepo in staging: $url"
+reset_mono_and_subrepos_to_main_branch () {
+  exit_if_pending_changes
 
-  fn=$(url_to_reponame "$url")
-  git -C "$(stagingdir)" clone "$url" "$fn";
+  # reset to main branch in monorepo
+  git reset --hard $(find_main_branch_of_monorepo)
+
+  # for each staged subrepo, reset to its main branch.
+  for url in $(all_subrepo_urls); do
+    fn=$(url_to_reponame "$url")
+    br=$(find_main_branch_in_dir $(reponame_to_stagingrepodir "$fn"))
+    reset_subrepo_in_staging_to_branch "$url" "$br"
+  done
 }
 
 # Feature branches always start from the local HEAD of the subrepo's main branch.
-create_branch_in_staged_subrepo () {
+create_fbranch_in_staged_subrepo () {
   url="$1"
   br="$2"
   echo "Creating branch $br in staging: $url"
@@ -148,33 +138,120 @@ create_branch_in_staged_subrepo () {
   git -C "$(reponame_to_stagingrepodir "$fn")" push -f -u origin "$br"
 }
 
-pull_branch_in_staging () {
-  url="$1"
+create_fbranch_in_monorepo () {
   br="$2"
-  echo "Pulling branch $br of subrepo in staging: $url"
+
+  git checkout -f -B "$br" $(find_main_branch_of_monorepo)
+  git push -f -u origin "$br"
+}
+
+has_branch() {
+  br="$1"
+  git branch | grep -q " $br$"
+}
+
+gitdir_has_branch() {
+  gitdir="$1"
+  br="$2"
+  git -C "$gitdir" branch | grep -q " $br$"
+}
+
+new_feature_branch () {
+  br="$1"
+
+  [[ -z "$br" ]] && { echo "Need a branch. We have: $br"; exit 1; }
+
+  exit_if_pending_changes
+
+  # reset to main branch in monorepo
+  reset_mono_and_subrepos_to_main_branch
+
+  # create feature branch in monorepo. Always starts out at main branch.
+  create_fbranch_in_monorepo "$br"
+
+  # create feature branch in all subrepos.
+  for url in $(all_subrepo_urls); do
+    create_fbranch_in_staged_subrepo "$url" "$br"
+  done
+  # for each staged subrepo, reset to its main branch.
+  # git checkout -b $fb HEAD
+  # for each staged subrepo, git checkout -b $fb HEAD
+}
+
+checkout_subrepo_in_staging() {
+  url="$1"
+  br="$2"  # ignored
+  echo "Initial checkout of subrepo in staging: $url"
 
   fn=$(url_to_reponame "$url")
   gitdir=$(reponame_to_stagingrepodir "$fn")
 
-  [[ -z "$br" ]] && {
-    br=$(find_main_branch_in_dir "$gitdir");
-    echo "Inferred main branch: $br";
+  [[ -d "$gitdir" ]] && {
+    echo "Repo $url already staged. Resetting to branch $br instead of checkout";
+    reset_subrepo_in_staging_to_branch "$url" "$br";
+    return
   }
-  [[ -z "$br" ]] && { echo "No branch to pull to: /$br/" >&2; exit 1; }
 
-  git -C "$(reponame_to_stagingrepodir "$fn")" reset --hard origin/"$br"
-  git -C "$(reponame_to_stagingrepodir "$fn")" pull -f origin
+  # TODO: git cherryclonesubrepo "$url"
+  git -C "$(stagingdir)" clone "$url" "$fn";
+
+  # TODO: git cherry_link_mono_to_subrepo "$url"
+  git -C "$gitdir" remote add cherryremote_monorepo $(monodir)
+
+  [[ -d "$gitdir" ]] || {
+    echo "Error staging $url!!" >&2
+    exit 1;
+    return 1;
+  }
+
+  echo "Resetting staged $url to branch $br after initial checkout."
+  reset_subrepo_in_staging_to_branch "$url" "$br";
 }
 
+reset_to_branch_in_staged_subrepo () {
+  url="$1"
+  br="$2"
+  echo "Resetting to branch $br of subrepo in staging: $url"
+
+  fn=$(url_to_reponame "$url")
+  gitdir=$(reponame_to_stagingrepodir "$fn")
+  mainbr=$(find_main_branch_in_dir "$gitdir");
+  echo "Inferred main branch: $mainbr";
+
+  [[ -z "$mainbr" ]] && {
+    echo "No main branch in subrepo $url!!!" >&2;
+    exit 1;
+    return 1;
+  }
+
+  [[ -z "$br" ]] && {
+    echo "No branch given. Resetting to main branch."
+    br="$mainbr"
+  }
+
+  gitdir_has_branch "$gitdir" "$br" || {
+    echo "Creating tracked local branch $br in subrepo $url (gitdir: $gitdir)";
+    git -C "$gitdir" checkout -f -B "$br" "$mainbr"
+  }
+
+  git -C "$(reponame_to_stagingrepodir "$fn")" reset --hard "$br"
+  #git -C "$(reponame_to_stagingrepodir "$fn")" pull -f origin
+}
+
+# checkout out the subrepo if needed.
+# If branch is empty reset to main branch.
+# create the branch locally if it's not present.
 reset_subrepo_in_staging_to_branch () {
   url="$1"
   br="$2"
   fn=$(url_to_reponame "$url")
-  [[ -d $(reponame_to_stagingrepodir "$fn") ]] && \
-    pull_branch_in_staging "$url" "$br" || {
-      checkout_subrepo_in_staging "$url" "$br"
-      create_branch_in_staged_subrepo "$url" "$br"
-    }
+  [[ ! -d $(reponame_to_stagingrepodir "$fn") ]] && {
+    echo "Repo $url not yet staged. Staging and creating local branch $br instead of resetting.";
+    checkout_subrepo_in_staging "$url" "$br"
+    return
+  }
+
+  reset_to_branch_in_staged_subrepo "$url" "$br"
 }
 
 # br == "" means use the main branch. TBD if that should be the contract.
@@ -185,48 +262,41 @@ reset_all_subrepos_in_staging_to_branch () {
   done
 }
 
+main_doit() {
+  MYBRANCH=$(current_branch)
 
-reset_mono_and_subrepos_to_main_branch () {
+  if is_main_branch "$MYBRANCH"; then
+    echo "Switch to the feature branch and rerun this command. I got $MYBRANCH.";
+    exit 1;
+  fi
+
+  echo "OK. On a feature branch ($MYBRANCH).";
+
   exit_if_pending_changes
 
-  # reset to main branch in monorepo
-  git reset --hard $(find_main_branch)
+  echo "OK. Resetting to origin's feature branch in subrepos."
 
-  # for each staged subrepo, reset to its main branch.
+  set -e
+  set -x
+
+  # First hard-reset all subrepos to origin version of feature branch.
+  # creating the branch if needed.
+  reset_all_subrepos_in_staging_to_branch "$MYBRANCH"
+
   for url in $(all_subrepo_urls); do
-    fn=$(url_to_reponame "$url")
-    br=$(find_main_branch_in_dir $(reponame_to_stagingrepodir "$fn"))
-    reset_subrepo_in_staging_to_branch "$url" "$br"
+    monocommits_to_stage_for_subrepo "$url" "$MYBRANCH"
   done
+
+  exit 0;
+
+  echo
+  echo "OK. Computing unsync'd commits:"
+  listunpicked | tac
+  echo
+
+  echo "OK. Cherry-picking unsync'd commits:"
+  listunpicked | tac | \
+    git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+
+  set +e
 }
-
-new_feature_branch () {
-  exit_if_pending_changes
-
-  reset_mono_and_subrepos_to_main_branch
-
-  # reset to main branch in monorepo
-  # for each staged subrepo, reset to its main branch.
-  # git checkout -b $fb HEAD
-  # for each staged subrepo, git checkout -b $fb HEAD
-}
-
-reset_all_subrepos_in_staging_to_branch "$MYBRANCH"
-
-for url in $(all_subrepo_urls); do
-  monocommits_to_stage_for_subrepo "$url" "$fbr"
-done
-
-exit 0;
-
-echo
-echo "OK. Computing unsync'd commits:"
-listunpicked | tac
-echo
-
-echo "OK. Cherry-picking unsync'd commits:"
-listunpicked | tac | \
-  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
-
-set +e
-
