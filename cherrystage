@@ -44,8 +44,27 @@ find_main_branch_of_monorepo () {
   git branch -a | grep -v remote | egrep -o '(main|master)' | head -n 1
 }
 
+current_branch_in_gitdir () {
+  gitdir="$1"
+  git -C "$gitdir" branch --show-current
+}
+
 find_main_branch_in_dir () {
   git -C "$1" branch -a | grep -v remote | egrep -o '(main|master)' | head -n 1
+}
+
+# does it in monodir.
+find_cherryremote_main_branch_for_url () {
+  url="$1"
+  remotename=$(url_to_remotename "$url")
+  git branch -r | grep cherryremote_ | egrep -o "$remotename/(main|master)" | head -n 1
+}
+
+# this has to be low-level like this. Using 'all_subrepo_urls' is circular.
+all_cherryremote_main_branches () {
+  # sort and uniq to remove dups due to lines like remote/xx/HEAD -> remote/xx/main
+  # followed by a line remote/xx/main by itself.
+  git branch -r | grep cherryremote_ | egrep -o "$remotename/(main|master)" | sort | uniq
 }
 
 has_pending_changes () {
@@ -80,15 +99,12 @@ return_if_pending_changes () {
     echo "OK. No pending changes to tracked files."
 }
 
-listunpicked () {
-  MSGNEEDLE="cherry picked from commit"
-  python $MYDIR/must-cherry-pick.py \
-    <(git log --format='%H' $(git remote | grep cherryremote_) ^$(git branch -a | grep -v remote | egrep -o '(main|master)')) \
-    <(git log --grep="$MSGNEEDLE" master | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')')
-}
-
 stagingdir () {
   echo $(gitroot)/00MONO
+}
+
+is_within_monodir () {
+  [[ -d "$(stagingdir)" ]]
 }
 
 stagingtmpdir () {
@@ -105,6 +121,26 @@ all_subrepo_urls() {
   git remote -v | grep cherryremote_ | grep fetch | cut -f 2 | cut -f 1 -d ' ' | sort
 }
 
+all_monodir_cherryremotes () {
+  git remote | grep cherryremote_ | sort
+}
+
+all_subrepo_main_branches () {
+  for url in $(all_subrepo_urls); do
+    fn=$(url_to_reponame "$url")
+    gitdir=$(reponame_to_stagingrepodir "$fn")
+    find_main_branch_in_dir "$gitdir"
+  done
+}
+
+all_subrepo_current_branches () {
+  for url in $(all_subrepo_urls); do
+    fn=$(url_to_reponame "$url")
+    gitdir=$(reponame_to_stagingrepodir "$fn")
+    current_branch_in_gitdir "$gitdir"
+  done
+}
+
 # ===============================
 
 # the directory under which a url should be checkout.
@@ -116,7 +152,7 @@ url_to_reponame () {
 # the name of the remote for a url (git remote -v).
 # e.g., ../somewhere/a -> cherryremote_a
 url_to_remotename () {
-  echo "cherryremote_"/$(url_to_reponame "$1")
+  echo "cherryremote_$(url_to_reponame "$1")"
 }
 
 reponame_to_stagingrepodir () {
@@ -165,6 +201,20 @@ create_fbranch_in_monorepo () {
 
   git checkout -f -B "$br" $(find_main_branch_of_monorepo)
   git push -f -u origin "$br"
+}
+
+gitdir_has_remote_by_name () {
+  gitdir="$1"
+  remotename="$2"
+  git -C "$gitdir" remote -v | grep fetch | grep -q "$remotename"
+}
+
+# cherryremote means in monodir.
+gitdir_has_cherryremote_for_url_bad () {
+  gitdir="$1"
+  url="$2"
+  remotename=$(url_to_remotename "$url")
+  gitdir_has_remote_by_name "$gitdir" "$remotename"
 }
 
 has_branch() {
@@ -222,7 +272,6 @@ checkout_subrepo_in_staging() {
 
   [[ -d "$gitdir" ]] || {
     echo "Error staging $url!!" >&2
-    exit 1;
     return 1;
   }
 
@@ -230,6 +279,7 @@ checkout_subrepo_in_staging() {
   reset_subrepo_in_staging_to_branch "$url" "$br";
 }
 
+# check if subrepo has a branch in its remote.
 gitdir_subrepo_origin_has_branch() {
   gitdir="$1"
   br="$2"
@@ -296,9 +346,39 @@ reset_all_subrepos_in_staging_to_branch () {
   done
 }
 
+# must be run within monodir.
+fetch_all_monodir_cherryremotes () {
+  monogitdir=$(monodir)
+  for url in $(all_subrepo_urls); do
+    remotename=$(url_to_remotename "$url")
+    git -C "$monogitdir" fetch "$remotename"
+  done
+}
+
+fetch_all_staged_subrepos () {
+  for url in $(all_subrepo_urls); do
+    fn=$(url_to_reponame "$url")
+    gitdir=$(reponame_to_stagingrepodir "$fn")
+    git -C "$gitdir" fetch "subrepo_actual_origin"
+  done
+}
+
+fast_forward_current_branch_in_all_staged_subrepos () {
+  for url in $(all_subrepo_urls); do
+    fn=$(url_to_reponame "$url")
+    gitdir=$(reponame_to_stagingrepodir "$fn")
+    git -C "$gitdir" pull --ff-only "subrepo_actual_origin"
+  done
+}
+
 # ======================================
 
 # br should be a feature branch.
+# monocommits that were not not cherry picked into monorepo from subrepos.
+# Note: we always start staging by first resetting staged subrepos to origin/br
+# and reapplying all new monocommits.
+# This is on purpose to keep things simple and reliable.
+# aka Staging monocommits is not incremental.
 monocommits_to_stage_for_subrepo () {
   url="$1"
   br="$2"
@@ -364,15 +444,15 @@ apply_monocommits_to_staged_subrepo () {
       echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
       continue
     }
+
+    #rm "$TMPPATCH" "$TMPLOGMSG"
   done < "$ifile"
 }
 
 # =============================================
 
-is_within_monodir () {
-  [[ -d "$(stagingdir)" ]]
-}
-
+# apply commits in mono repo to staged subrepos.
+# monocommits affecting multiple subrepos are split.
 cherry_stage () {
   MYBRANCH=$(current_branch)
 
@@ -380,6 +460,8 @@ cherry_stage () {
     echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
     return 1;
   }
+
+  echo "OK. We're running within the monodir.";
 
   if is_main_branch "$MYBRANCH"; then
     echo "Switch to the feature branch and rerun this command. I got $MYBRANCH.";
@@ -396,7 +478,8 @@ cherry_stage () {
   echo "OK. Resetting to origin's feature branch in subrepos."
 
   # First hard-reset all subrepos to origin version of feature branch.
-  # creating the branch if needed.
+  # creating the branch locally and at the origin if needed.
+  # Do 'git fetch' on all staged repos.
   reset_all_subrepos_in_staging_to_branch "$MYBRANCH"
 
   for url in $(all_subrepo_urls); do
@@ -418,4 +501,167 @@ cherry_stage () {
     # By this time, we should have done 'git fetch' on the staged repos.
     apply_monocommits_to_staged_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS"
   done
+}
+
+cherry_add () {
+  is_within_monodir || {
+    echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
+    return 1;
+  }
+
+  echo "OK. We're running within the monodir.";
+
+  MYBRANCH=$(current_branch)
+  is_main_branch "$MYBRANCH" || {
+    echo "Switch to the main branch and rerun this command. I got $MYBRANCH."
+    return 1;
+  }
+
+  echo "OK. On the branch ($MYBRANCH).";
+
+  has_pending_changes && {
+    echo "Unclean working dir or index." >&2
+    return 1;
+  }
+
+  echo "OK. Setting up subrepos."
+
+  for url in $*; do
+    fn=($url_to_reponame "$url")
+    gitdir=$(reponame_to_stagingrepodir "$fn")
+    remotename=$(url_to_remotename "$url")
+
+    gitdir_has_remote_by_name $(monodir) "$remotename" && {
+      echo "Removing existing remote named $remotename that's in the way."
+      git remote remove "$remotename"
+    }
+
+    git remote add "$remotename" "$url"
+    git fetch "$remotename"
+    # TODO: cherry-pick the commits from remote into my tree.
+  done
+}
+
+cherry_rm () {
+  is_within_monodir || {
+    echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
+    return 1;
+  }
+
+  echo "OK. We're running within the monodir.";
+
+  MYBRANCH=$(current_branch)
+  is_main_branch "$MYBRANCH" || {
+    echo "Switch to the main branch and rerun this command. I got $MYBRANCH."
+    return 1;
+  }
+
+  echo "OK. On the branch ($MYBRANCH).";
+
+  has_pending_changes && {
+    echo "Unclean working dir or index." >&2
+    return 1;
+  }
+
+  for url in $*; do
+    fn=($url_to_reponame "$url")
+    gitdir=$(reponame_to_stagingrepodir "$fn")
+    remotename=$(url_to_remotename "$url")
+
+    gitdir_has_remote_by_name $(monodir) "$remotename" || {
+      echo "No remote named $remotename?"
+      continue;
+    }
+
+    git remote remove "$remotename"
+    echo "Removing staged version of subrepo $url"
+    echo rm -rf "$gitdir"
+  done
+}
+
+# cherry-pick todo commits into local main branch.
+# bail if current HEAD is not main branch.
+#  git symbolic-ref HEAD =~ refs/heads/(master|main)
+# bail if index and working tree are unclean.
+#  git status --porcelain 2>&1 | wc -c | tr -d ' '
+# git stash push
+# git cherryfetch
+# git cherrytodo
+# cherrypull.sh
+# git stash pop
+
+git_log_cherryremotes_not_main () {
+  mainbr="$(find_main_branch_of_monorepo)"
+  git log --format='%H' $(all_cherryremote_main_branches) "^$mainbr"
+}
+
+git_log_grep_imported_commits () {
+  MSGNEEDLE="cherry picked from commit"
+  mainbr="$(find_main_branch_of_monorepo)"
+
+  # extract the commitid alone from suffixes added by git-cherry-pick -x
+  #   (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
+  git log --grep="$MSGNEEDLE" "$mainbr" | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')'
+}
+
+cherryremote_main_commits_absent_in_main_branch () {
+  # python program does set difference (first-second) *and also* outputs
+  # the elemts in the relative order as in the first file. Too baroque to
+  # to this using awk etc (we can't do comm -23, it needs sorted inputs).
+  python $MYDIR/must-cherry-pick.py \
+    <(git_log_cherryremotes_not_main) <(git_log_grep_imported_commits)
+}
+
+cherry_sync () {
+  is_within_monodir || {
+    echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
+    return 1;
+  }
+
+  echo "OK. We're running within the monodir.";
+
+  has_pending_changes && {
+    echo "Unclean working dir or index." >&2
+    return 1;
+  }
+
+  MYBRANCH=$(current_branch)
+  is_main_branch "$MYBRANCH" || {
+    echo "Switch to the main branch and rerun this command. I got $MYBRANCH."
+    return 1;
+  }
+
+  echo "OK. On the branch ($MYBRANCH).";
+
+  # Reset subrepos also to their main branches.
+  # empty branch means reset to the main branch.
+  echo "OK. Resetting all subrepos to their main branches."
+  reset_all_subrepos_in_staging_to_branch ""
+
+  echo "OK. Fetching from cherry remotes."
+  fetch_all_monodir_cherryremotes
+
+  echo "OK. Fetching in subrepos."
+  fetch_all_staged_subrepos
+
+  echo "OK. Fast-forwarding main branch in subrepos."
+  fast_forward_current_branch_in_all_staged_subrepos
+
+  TMPTOIMPORT=$(mktemp "$(stagingtmpdir)/toimport.XXXXXX")
+  echo "Computing unsync'd commits and saving in $TMPTOIMPORT"
+  cherryremote_main_commits_absent_in_main_branch > "$TMPTOIMPORT"
+
+  echo
+  echo "Found $(lines_in_file "$TMPTOIMPORT") commits."
+  echo
+  cat_indented "$TMPTOIMPORT"
+
+  echo "Cherry-picking commits to be imported from cherryremotes to monorepo:"
+  # using --stdin to strictly serialize and have a single error to catch
+  # vs using xargs. Helps prevent shenanigans with xargs running multiple
+  # processes, nuances in how it returns error status etc.
+  #tac "$TMPTOIMPORT" | \
+  #  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+
+  #rm "$TMPTOIMPORT"
 }
