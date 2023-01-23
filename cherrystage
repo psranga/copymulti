@@ -36,7 +36,7 @@ current_branch () {
 }
 
 is_main_branch () {
-  br="$1"
+  local br="$1"
   [[ "$br" = "main" || "$br" == "master" ]];
 }
 
@@ -45,7 +45,7 @@ find_main_branch_of_monorepo () {
 }
 
 current_branch_in_gitdir () {
-  gitdir="$1"
+  local gitdir="$1"
   git -C "$gitdir" branch --show-current
 }
 
@@ -55,7 +55,7 @@ find_main_branch_in_dir () {
 
 # does it in monodir.
 find_cherryremote_main_branch_for_url () {
-  url="$1"
+  local url="$1"
   remotename=$(url_to_remotename "$url")
   git branch -r | grep cherryremote_ | egrep -o "$remotename/(main|master)" | head -n 1
 }
@@ -108,7 +108,7 @@ is_within_monodir () {
 }
 
 stagingtmpdir () {
-  path="$(stagingdir)/tmp"
+  local path="$(stagingdir)/tmp"
   [[ -d "$path" ]] || mkdir -p "$path"
   echo $path
 }
@@ -127,16 +127,16 @@ all_monodir_cherryremotes () {
 
 all_subrepo_main_branches () {
   for url in $(all_subrepo_urls); do
-    fn=$(url_to_reponame "$url")
-    gitdir=$(reponame_to_stagingrepodir "$fn")
+    local fn=$(url_to_reponame "$url")
+    local gitdir=$(reponame_to_stagingrepodir "$fn")
     find_main_branch_in_dir "$gitdir"
   done
 }
 
 all_subrepo_current_branches () {
   for url in $(all_subrepo_urls); do
-    fn=$(url_to_reponame "$url")
-    gitdir=$(reponame_to_stagingrepodir "$fn")
+    local fn=$(url_to_reponame "$url")
+    local gitdir=$(reponame_to_stagingrepodir "$fn")
     current_branch_in_gitdir "$gitdir"
   done
 }
@@ -160,13 +160,13 @@ reponame_to_stagingrepodir () {
 }
 
 main_branch_of_staged_subrepo () {
-  url="$1"
-  fn=$(url_to_reponame "$url")
+  local url="$1"
+  local fn=$(url_to_reponame "$url")
   find_main_branch_in_dir "$(reponame_to_stagingrepodir "$fn")"
 }
 
 remotename_of_subrepo () {
-  url="$1"
+  local url="$1"
   echo "cherryremote_"$(url_to_reponame $url)
 }
 
@@ -178,58 +178,58 @@ reset_mono_and_subrepos_to_main_branch () {
 
   # for each staged subrepo, reset to its main branch.
   for url in $(all_subrepo_urls); do
-    fn=$(url_to_reponame "$url")
-    br=$(find_main_branch_in_dir $(reponame_to_stagingrepodir "$fn"))
+    local fn=$(url_to_reponame "$url")
+    local br=$(find_main_branch_in_dir $(reponame_to_stagingrepodir "$fn"))
     reset_subrepo_in_staging_to_branch "$url" "$br"
   done
 }
 
 # Feature branches always start from the local HEAD of the subrepo's main branch.
 create_fbranch_in_staged_subrepo () {
-  url="$1"
-  br="$2"
+  local url="$1"
+  local br="$2"
   echo "Creating branch $br in staging: $url"
 
-  fn=$(url_to_reponame "$url")
+  local fn=$(url_to_reponame "$url")
   git -C "$(reponame_to_stagingrepodir "$fn")" checkout -f -B "$br" $(main_branch_of_staged_subrepo "$url")
   # create the branch on the remote.
   git -C "$(reponame_to_stagingrepodir "$fn")" push -f -u origin "$br"
 }
 
 create_fbranch_in_monorepo () {
-  br="$2"
+  local br="$2"
 
   git checkout -f -B "$br" $(find_main_branch_of_monorepo)
   git push -f -u origin "$br"
 }
 
 gitdir_has_remote_by_name () {
-  gitdir="$1"
-  remotename="$2"
+  local gitdir="$1"
+  local remotename="$2"
   git -C "$gitdir" remote -v | grep fetch | grep -q "$remotename"
 }
 
 # cherryremote means in monodir.
 gitdir_has_cherryremote_for_url_bad () {
-  gitdir="$1"
-  url="$2"
-  remotename=$(url_to_remotename "$url")
+  local gitdir="$1"
+  local url="$2"
+  local remotename=$(url_to_remotename "$url")
   gitdir_has_remote_by_name "$gitdir" "$remotename"
 }
 
 has_branch() {
-  br="$1"
+  local br="$1"
   git branch | grep -q " $br$"
 }
 
 gitdir_has_branch() {
-  gitdir="$1"
-  br="$2"
+  local gitdir="$1"
+  local br="$2"
   git -C "$gitdir" branch | grep -q " $br$"
 }
 
 new_feature_branch () {
-  br="$1"
+  local br="$1"
 
   [[ -z "$br" ]] && { echo "Need a branch. We have: $br"; exit 1; }
 
@@ -251,12 +251,12 @@ new_feature_branch () {
 }
 
 checkout_subrepo_in_staging() {
-  url="$1"
-  br="$2"  # ignored
+  local url="$1"
+  local br="$2"  # ignored
   echo "Initial checkout of subrepo in staging: $url"
 
-  fn=$(url_to_reponame "$url")
-  gitdir=$(reponame_to_stagingrepodir "$fn")
+  local fn=$(url_to_reponame "$url")
+  local gitdir=$(reponame_to_stagingrepodir "$fn")
 
   [[ -d "$gitdir" ]] && {
     echo "Repo $url already staged. Resetting to branch $br instead of checkout";
@@ -281,19 +281,19 @@ checkout_subrepo_in_staging() {
 
 # check if subrepo has a branch in its remote.
 gitdir_subrepo_origin_has_branch() {
-  gitdir="$1"
-  br="$2"
+  local gitdir="$1"
+  local br="$2"
   git -C "$gitdir" branch -r | grep -q " remotes/subrepo_actual_origin/$br$"
 }
 
 reset_to_branch_in_staged_subrepo () {
-  url="$1"
-  br="$2"
+  local url="$1"
+  local br="$2"
   echo "Resetting to branch $br of subrepo in staging: $url"
 
-  fn=$(url_to_reponame "$url")
-  gitdir=$(reponame_to_stagingrepodir "$fn")
-  mainbr=$(find_main_branch_in_dir "$gitdir");
+  local fn=$(url_to_reponame "$url")
+  local gitdir=$(reponame_to_stagingrepodir "$fn")
+  local mainbr=$(find_main_branch_in_dir "$gitdir");
   echo "Inferred main branch: $mainbr";
 
   [[ -z "$mainbr" ]] && {
@@ -326,9 +326,9 @@ reset_to_branch_in_staged_subrepo () {
 # If branch is empty reset to main branch.
 # create the branch locally if it's not present.
 reset_subrepo_in_staging_to_branch () {
-  url="$1"
-  br="$2"
-  fn=$(url_to_reponame "$url")
+  local url="$1"
+  local br="$2"
+  local fn=$(url_to_reponame "$url")
   [[ ! -d $(reponame_to_stagingrepodir "$fn") ]] && {
     echo "Repo $url not yet staged. Staging and creating local branch $br instead of resetting.";
     checkout_subrepo_in_staging "$url" "$br"
@@ -340,7 +340,7 @@ reset_subrepo_in_staging_to_branch () {
 
 # br == "" means use the main branch. TBD if that should be the contract.
 reset_all_subrepos_in_staging_to_branch () {
-  br="$1"
+  local br="$1"
   for url in $(all_subrepo_urls); do
     reset_subrepo_in_staging_to_branch "$url" "$br"
   done
@@ -348,7 +348,7 @@ reset_all_subrepos_in_staging_to_branch () {
 
 # must be run within monodir.
 fetch_all_monodir_cherryremotes () {
-  monogitdir=$(monodir)
+  local monogitdir=$(monodir)
   for url in $(all_subrepo_urls); do
     remotename=$(url_to_remotename "$url")
     git -C "$monogitdir" fetch "$remotename"
@@ -356,17 +356,19 @@ fetch_all_monodir_cherryremotes () {
 }
 
 fetch_all_staged_subrepos () {
+  local url=""
   for url in $(all_subrepo_urls); do
-    fn=$(url_to_reponame "$url")
-    gitdir=$(reponame_to_stagingrepodir "$fn")
+    local fn=$(url_to_reponame "$url")
+    local gitdir=$(reponame_to_stagingrepodir "$fn")
     git -C "$gitdir" fetch "subrepo_actual_origin"
   done
 }
 
 fast_forward_current_branch_in_all_staged_subrepos () {
+  local url=""
   for url in $(all_subrepo_urls); do
-    fn=$(url_to_reponame "$url")
-    gitdir=$(reponame_to_stagingrepodir "$fn")
+    local fn=$(url_to_reponame "$url")
+    local gitdir=$(reponame_to_stagingrepodir "$fn")
     git -C "$gitdir" pull --quiet --ff-only "subrepo_actual_origin"
   done
 }
@@ -380,37 +382,37 @@ fast_forward_current_branch_in_all_staged_subrepos () {
 # This is on purpose to keep things simple and reliable.
 # aka Staging monocommits is not incremental.
 monocommits_to_stage_for_subrepo () {
-  url="$1"
-  br="$2"
+  local url="$1"
+  local br="$2"
 
   git -C "$(monodir)" rev-list --grep="cherry picked from commit" --invert-grep \
     "$br" ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
 }
 
 write_monocommits_to_stage_for_subrepo () {
-  url="$1"
-  br="$2"
-  ofile="$3"
+  local url="$1"
+  local br="$2"
+  local ofile="$3"
   echo "Computing monocommits in (fbranch) $br to be staged for subrepo: $url"
 
   monocommits_to_stage_for_subrepo "$url" "$br" > $ofile
 }
 
 apply_monocommits_to_staged_subrepo () {
-  url="$1"
-  br="$2"
-  ifile="$3"
+  local url="$1"
+  local br="$2"
+  local ifile="$3"
 
-  fn=$(url_to_reponame "$url")
-  gitdir=$(reponame_to_stagingrepodir "$fn")
-  monogitdir=$(monodir)
+  local fn=$(url_to_reponame "$url")
+  local gitdir=$(reponame_to_stagingrepodir "$fn")
+  local monogitdir=$(monodir)
 
   echo "Applying $(lines_in_file "$ifile") monocommits from branch $br to staged subrepo $url branch $br (gitdir: $gitdir)"
   while read -r commitid; do
     echo;
     echo "Applying commit: $commitid";
-    TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${br}.${fn}.${commitid}.XXXXXX")
-    TMPLOGMSG=$(mktemp "$(stagingtmpdir)/logmsg.${br}.${fn}.${commitid}.XXXXX")
+    local TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${br}.${fn}.${commitid}.XXXXXX")
+    local TMPLOGMSG=$(mktemp "$(stagingtmpdir)/logmsg.${br}.${fn}.${commitid}.XXXXX")
     # -n +2 removes the first "commit <id>" line.
     git -C "$monogitdir" rev-list --pretty='format:%B' "${commitid}^..${commitid}" | \
       tail -n +2 > "$TMPLOGMSG"
@@ -454,7 +456,7 @@ apply_monocommits_to_staged_subrepo () {
 # apply commits in mono repo to staged subrepos.
 # monocommits affecting multiple subrepos are split.
 cherry_stage () {
-  MYBRANCH=$(current_branch)
+  local MYBRANCH=$(current_branch)
 
   is_within_monodir || {
     echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
@@ -482,12 +484,13 @@ cherry_stage () {
   # Do 'git fetch' on all staged repos.
   reset_all_subrepos_in_staging_to_branch "$MYBRANCH"
 
+  local url fn gitdir remotename
   for url in $(all_subrepo_urls); do
     echo
     echo "Computing monocommits in fbranch $MYBRANCH that should be staged for subrepo $url"
 
-    fn=$(url_to_reponame "$url")
-    TMPTODOCOMMITS="$(stagingtmpdir)/todocommits.${MYBRANCH}.${fn}"
+    local fn=$(url_to_reponame "$url")
+    local TMPTODOCOMMITS="$(stagingtmpdir)/todocommits.${MYBRANCH}.${fn}"
     echo "Todo commits should be in: $TMPTODOCOMMITS"
 
     write_monocommits_to_stage_for_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS" || {
@@ -529,9 +532,9 @@ cherry_add () {
   echo "OK. Setting up subrepos."
 
   for url in $*; do
-    fn=$(url_to_reponame "$url")
-    gitdir=$(reponame_to_stagingrepodir "$fn")
-    remotename=$(url_to_remotename "$url")
+    local fn=$(url_to_reponame "$url")
+    local gitdir=$(reponame_to_stagingrepodir "$fn")
+    local remotename=$(url_to_remotename "$url")
 
     gitdir_has_remote_by_name $(monodir) "$remotename" && {
       echo "Removing existing remote named $remotename that's in the way."
@@ -568,10 +571,11 @@ cherry_rm () {
     return 1;
   }
 
+  local url=""
   for url in $*; do
-    fn=$(url_to_reponame "$url")
-    gitdir=$(reponame_to_stagingrepodir "$fn")
-    remotename=$(url_to_remotename "$url")
+    local fn=$(url_to_reponame "$url")
+    local gitdir=$(reponame_to_stagingrepodir "$fn")
+    local remotename=$(url_to_remotename "$url")
 
     gitdir_has_remote_by_name $(monodir) "$remotename" || {
       echo "No remote named $remotename?"
@@ -596,13 +600,13 @@ cherry_rm () {
 # git stash pop
 
 git_log_cherryremotes_not_main () {
-  mainbr="$(find_main_branch_of_monorepo)"
+  local mainbr="$(find_main_branch_of_monorepo)"
   git log --format='%H' $(all_cherryremote_main_branches) "^$mainbr"
 }
 
 git_log_grep_imported_commits () {
-  MSGNEEDLE="cherry picked from commit"
-  mainbr="$(find_main_branch_of_monorepo)"
+  local MSGNEEDLE="cherry picked from commit"
+  local mainbr="$(find_main_branch_of_monorepo)"
 
   # extract the commitid alone from suffixes added by git-cherry-pick -x
   #   (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
@@ -632,7 +636,7 @@ cherry_sync () {
     return 1;
   }
 
-  MYBRANCH=$(current_branch)
+  local MYBRANCH=$(current_branch)
   is_main_branch "$MYBRANCH" || {
     echo "Switch to the main branch and rerun this command. I got $MYBRANCH."
     return 1;
@@ -654,11 +658,11 @@ cherry_sync () {
   echo "OK. Fast-forwarding main branch in subrepos."
   fast_forward_current_branch_in_all_staged_subrepos
 
-  TMPTOIMPORT=$(mktemp "$(stagingtmpdir)/toimport.XXXXXX")
+  local TMPTOIMPORT=$(mktemp "$(stagingtmpdir)/toimport.XXXXXX")
   echo "Computing unsync'd commits and saving in $TMPTOIMPORT"
   cherryremote_main_commits_absent_in_main_branch > "$TMPTOIMPORT"
 
-  num_commits=$(lines_in_file "$TMPTOIMPORT")
+  local num_commits=$(lines_in_file "$TMPTOIMPORT")
   echo
   echo "Need to cherry pick $num_commits commits across all cherryremotes."
 
