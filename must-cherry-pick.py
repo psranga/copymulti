@@ -2,6 +2,7 @@
 # argv[2] = set B
 #
 # Writes out (A-B) in the same order they appear in A.
+# Does not write out a line if it's the same as one written earlier.
 
 import sys
 
@@ -16,7 +17,10 @@ for l in f2:
     l = l.strip()
     b[l] = 1
 
+a_done = {}
 for l in f1:
     l = l.strip()
     if not l in b:
-      print(l)
+      if not l in a_done:
+        print(l)
+        a_done[l] = 1

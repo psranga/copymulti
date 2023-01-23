@@ -630,8 +630,8 @@ git_log_cherryremotes_not_main () {
   local url="$1"
   local mainbr="$(find_main_branch_of_monorepo)"
   [[ -z "$url" ]] &&
-    git log --no-merges --format='%H' $(all_cherryremote_main_branches) "^$mainbr" ||
-    git log --no-merges --format='%H' $(find_cherryremote_main_branch_for_url "$url") "^$mainbr"
+    git log --no-merges --format='%H' $(all_cherryremote_main_branches) "^$mainbr" | tac ||
+    git log --no-merges --format='%H' $(find_cherryremote_main_branch_for_url "$url") "^$mainbr" | tac
 
 }
 
@@ -641,7 +641,7 @@ git_log_grep_imported_commits () {
 
   # extract the commitid alone from suffixes added by git-cherry-pick -x
   #   (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
-  git log --no-merges --grep="$MSGNEEDLE" "$mainbr" | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')'
+  git log --no-merges --grep="$MSGNEEDLE" "$mainbr" | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')' | tac
 }
 
 cherryremote_main_commits_absent_in_main_branch () {
@@ -829,7 +829,7 @@ cherry_sync () {
 
     echo
     echo "Computing unsync'd commits for $url and saving in $TMPTOIMPORT"
-    cherryremote_main_commits_absent_in_main_branch "$url" | tac > "$TMPTOIMPORT"
+    cherryremote_main_commits_absent_in_main_branch "$url" > "$TMPTOIMPORT"
     [[ "$commit_limit" -gt 0 ]] && {
       head -n "$commit_limit" "$TMPTOIMPORT" > "$TMPTOIMPORT.head"
       TMPTOIMPORT="$TMPTOIMPORT.head"
