@@ -11,6 +11,19 @@
 # cherrypull.sh
 # git stash pop
 
+is_libcherry_available 2>/dev/null && {
+  echo "Not setting prompt: libcherry is already loaded in this shell."
+} || {
+  echo "Setting prompt: seems to be the first time loading libcherry in this shell."
+  PS1="🔥 $PS1"
+}
+(( $SHLVL < 2 )) && echo "Warning: top shell. #YOLO"
+echo "Updating libcherry commands in this shell."
+
+is_libcherry_available () {
+  true
+}
+
 # 'wc -l' and removes the leading whitespace.
 lines_in_file () {
   ifn="$1"
@@ -836,3 +849,4 @@ cherry_sync () {
 
   set +e; set +x
 }
+
