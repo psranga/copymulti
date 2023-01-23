@@ -19,4 +19,4 @@ for l in f2:
 for l in f1:
     l = l.strip()
     if not l in b:
-      print l
+      print(l)

@@ -39,10 +39,11 @@ gitroot () {
   git rev-parse --show-toplevel
 }
 
-#MYDIR=$(dirname "$0")
+MYDIR=$(dirname "$0")
+echo "MYDIR: $MYDIR"
 # Convention: store these scripts in the parent of the repo. Or Maybe within
 # 00MONO?
-MYDIR=$(dirname $(gitroot))
+#MYDIR="$(gitroot)/00MONO/copymulti"
 
 current_branch () {
   git branch --show-current
@@ -122,7 +123,7 @@ is_within_monodir () {
 
 stagingtmpdir () {
   local path="$(stagingdir)/tmp"
-  [[ -d "$path" ]] || mkdir -p "$path"
+  [[ -d "$path" ]] || /bin/mkdir -p "$path"
   echo $path
 }
 
@@ -159,7 +160,7 @@ all_subrepo_current_branches () {
 # the directory under which a url should be checkout.
 # ls 00MONO, ls.
 url_to_reponame () {
-  basename "$1"
+  basename "$1" | sed -e 's/\.git$//g'
 }
 
 # the name of the remote for a url (git remote -v).
@@ -382,14 +383,12 @@ fetch_all_staged_subrepos () {
 }
 
 fast_forward_current_branch_in_all_staged_subrepos () {
-  set -e; set -x
   local url=""
   for url in $(all_subrepo_urls); do
     local fn=$(url_to_reponame "$url")
     local gitdir=$(reponame_to_stagingrepodir "$fn")
     git -C "$gitdir" pull --quiet --ff-only "subrepo_actual_origin"
   done
-  set +e; set +x
 }
 
 # ======================================
@@ -631,8 +630,8 @@ git_log_cherryremotes_not_main () {
   local url="$1"
   local mainbr="$(find_main_branch_of_monorepo)"
   [[ -z "$url" ]] &&
-    git log --format='%H' $(all_cherryremote_main_branches) "^$mainbr" ||
-    git log --format='%H' $(find_cherryremote_main_branch_for_url "$url") "^$mainbr"
+    git log --no-merges --format='%H' $(all_cherryremote_main_branches) "^$mainbr" ||
+    git log --no-merges --format='%H' $(find_cherryremote_main_branch_for_url "$url") "^$mainbr"
 
 }
 
@@ -642,7 +641,7 @@ git_log_grep_imported_commits () {
 
   # extract the commitid alone from suffixes added by git-cherry-pick -x
   #   (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
-  git log --grep="$MSGNEEDLE" "$mainbr" | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')'
+  git log --no-merges --grep="$MSGNEEDLE" "$mainbr" | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')'
 }
 
 cherryremote_main_commits_absent_in_main_branch () {
@@ -650,7 +649,9 @@ cherryremote_main_commits_absent_in_main_branch () {
   # python program does set difference (first-second) *and also* outputs
   # the elemts in the relative order as in the first file. Too baroque to
   # to this using awk etc (we can't do comm -23, it needs sorted inputs).
-  python $MYDIR/must-cherry-pick.py \
+  git_log_cherryremotes_not_main "$url" | tee "$(stagingtmpdir)/seta"
+  git_log_grep_imported_commits "$url" | tee "$(stagingtmpdir)/setb"
+  python3 $MYDIR/must-cherry-pick.py \
     <(git_log_cherryremotes_not_main "$url") <(git_log_grep_imported_commits "$url")
 }
 
@@ -729,8 +730,11 @@ apply_subrepo_commits_to_monorepo () {
   local ifile="$2"
 
   echo "apply_subrepo_commits_to_monorepo: running in $(pwd)"
-  echo "Applying $(lines_in_file "$ifile") subrepo commits into directory $fn"
+  echo "Applying $(lines_in_file "$ifile") subrepo commits from $ifile into directory $fn"
+
+  local nsuccess=0 ntot=0
   while read -r commitid; do
+    (( ntot = ntot + 1 ))
     echo;
     echo "Applying commit: $commitid";
     local TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${fn}.${commitid}.XXXXXX")
@@ -758,12 +762,14 @@ apply_subrepo_commits_to_monorepo () {
       echo "Error import subrepo commit ${commitid} into subdir $fn."
       echo "Cleaning git am to continue to next commits."
       git am --abort
-      continue
+      false; return 1;
+      break
     }
 
     # Link imported commit with monocommit via suffix in commit message (like git cherry-pick -x).
     git commit --amend -F "$TMPLOGMSG" && {
       echo "Edited commit message to link imported subrepo commit $commitid to its monocommit."
+      (( nsuccess = nsuccess + 1 ))
     } || {
       echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
       continue
@@ -771,10 +777,15 @@ apply_subrepo_commits_to_monorepo () {
 
     #rm "$TMPPATCH" "$TMPLOGMSG"
   done < "$ifile"
+  echo "apply_subrepo_commits_to_monorepo: ntot: $ntot nsuccess: $nsuccess"
 }
 
 cherry_sync () {
   set -e; set -x
+
+  local commit_limit="$1" dry_run=0
+  [[ -z "$commit_limit" ]] && commit_limit=-1
+  [[ "$commit_limit" -eq 0 ]] && dry_run=1
 
   is_within_monodir || {
     echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
@@ -819,6 +830,10 @@ cherry_sync () {
     echo
     echo "Computing unsync'd commits for $url and saving in $TMPTOIMPORT"
     cherryremote_main_commits_absent_in_main_branch "$url" | tac > "$TMPTOIMPORT"
+    [[ "$commit_limit" -gt 0 ]] && {
+      head -n "$commit_limit" "$TMPTOIMPORT" > "$TMPTOIMPORT.head"
+      TMPTOIMPORT="$TMPTOIMPORT.head"
+    }
 
     local num_commits=$(lines_in_file "$TMPTOIMPORT")
     echo
@@ -839,7 +854,7 @@ cherry_sync () {
       # exporting commits. This is significantly easier, probably more reliable too?
       #tac "$TMPTOIMPORT" | \
       #  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
-      apply_subrepo_commits_to_monorepo "$fn" "$TMPTOIMPORT"
+      [[ "$dry_run" = "0" ]] && apply_subrepo_commits_to_monorepo "$fn" "$TMPTOIMPORT"
     }
   done
 
