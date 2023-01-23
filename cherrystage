@@ -606,8 +606,12 @@ cherry_rm () {
 # git stash pop
 
 git_log_cherryremotes_not_main () {
+  local url="$1"
   local mainbr="$(find_main_branch_of_monorepo)"
-  git log --format='%H' $(all_cherryremote_main_branches) "^$mainbr"
+  [[ -z "$url" ]] &&
+    git log --format='%H' $(all_cherryremote_main_branches) "^$mainbr" ||
+    git log --format='%H' $(find_cherryremote_main_branch_for_url "$url") "^$mainbr"
+
 }
 
 git_log_grep_imported_commits () {
@@ -620,14 +624,15 @@ git_log_grep_imported_commits () {
 }
 
 cherryremote_main_commits_absent_in_main_branch () {
+  local url="$1"
   # python program does set difference (first-second) *and also* outputs
   # the elemts in the relative order as in the first file. Too baroque to
   # to this using awk etc (we can't do comm -23, it needs sorted inputs).
   python $MYDIR/must-cherry-pick.py \
-    <(git_log_cherryremotes_not_main) <(git_log_grep_imported_commits)
+    <(git_log_cherryremotes_not_main "$url") <(git_log_grep_imported_commits "$url")
 }
 
-cherry_sync () {
+cherry_sync_unused () {
   set -e; set -x
 
   is_within_monodir || {
@@ -688,6 +693,131 @@ cherry_sync () {
     #tac "$TMPTOIMPORT" | \
     #  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
   }
+
+  echo "Done."
+
+  #rm "$TMPTOIMPORT"
+
+  set +e; set +x
+}
+
+apply_subrepo_commits_to_monorepo () {
+  local fn="$1"
+  local ifile="$2"
+
+  echo "Applying $(lines_in_file "$ifile") subrepo commits into directory $fn"
+  while read -r commitid; do
+    echo;
+    echo "Applying commit: $commitid";
+    local TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${fn}.${commitid}.XXXXXX")
+    local TMPLOGMSG=$(mktemp "$(stagingtmpdir)/logmsg.${fn}.${commitid}.XXXXX")
+    # -n +2 removes the first "commit <id>" line.
+    git -C "$monogitdir" rev-list --pretty='format:%B' "${commitid}^..${commitid}" | \
+      tail -n +2 > "$TMPLOGMSG"
+    echo >> "$TMPLOGMSG"
+    # (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
+    echo >> "$TMPLOGMSG" "(cherry picked from commit $commitid)"
+
+    # Generate the patch.
+    git -C "$monogitdir" format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
+      > "$TMPPATCH"
+
+    echo "Patch is in: $TMPPATCH"
+    echo "Log message is in: $TMPLOGMSG"
+    echo
+    cat_indented "$TMPPATCH"
+
+    # Apply the patch.
+    cat "$TMPPATCH" | git -C "$gitdir" am --directory="$fn" && {
+      echo "Success! Imported subrepo commit $commitid into subdir $fn."
+    } || {
+      echo "Error import subrepo commit ${commitid} into subdir $fn."
+      echo "Cleaning git am to continue to next commits."
+      git -C "$gitdir" am --abort
+      continue
+    }
+
+    # Link imported commit with monocommit via suffix in commit message (like git cherry-pick -x).
+    git -C "$gitdir" commit --amend -F "$TMPLOGMSG" && {
+      echo "Edited commit message to link imported subrepo commit $commitid to its monocommit."
+    } || {
+      echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
+      continue
+    }
+
+    #rm "$TMPPATCH" "$TMPLOGMSG"
+  done < "$ifile"
+}
+
+cherry_sync () {
+  set -e; set -x
+
+  is_within_monodir || {
+    echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
+    return 1;
+  }
+
+  echo "OK. We're running within the monodir.";
+
+  has_pending_changes && {
+    echo "Unclean working dir or index." >&2
+    return 1;
+  }
+
+  local MYBRANCH=$(current_branch)
+  is_main_branch "$MYBRANCH" || {
+    echo "Switch to the main branch and rerun this command. I got $MYBRANCH."
+    return 1;
+  }
+
+  echo "OK. On the branch ($MYBRANCH).";
+
+  # Reset subrepos also to their main branches.
+  # empty branch means reset to the main branch.
+  echo "OK. Resetting all subrepos to their main branches."
+  reset_all_subrepos_in_staging_to_branch ""
+
+  echo "OK. Fetching from cherry remotes."
+  fetch_all_monodir_cherryremotes
+
+  echo "OK. Fetching in subrepos."
+  fetch_all_staged_subrepos
+
+  echo "OK. Fast-forwarding main branch in subrepos."
+  fast_forward_current_branch_in_all_staged_subrepos
+
+  local url fn gitdir remotename
+  for url in $(all_subrepo_urls); do
+    local fn=$(url_to_reponame "$url")
+    local TMPTOIMPORT=$(mktemp "$(stagingtmpdir)/toimport.${fn}.XXXXXX")
+    local gitdir=$(reponame_to_stagingrepodir "$fn")
+
+    echo
+    echo "Computing unsync'd commits for $url and saving in $TMPTOIMPORT"
+    cherryremote_main_commits_absent_in_main_branch "$url" | tac > "$TMPTOIMPORT"
+
+    local num_commits=$(lines_in_file "$TMPTOIMPORT")
+    echo
+    echo "Need to cherry pick $num_commits commits into subdir $fn (for $url)."
+
+    [[ "$num_commits" -le 0 ]] && {
+      echo "Nothing to cherry pick. Doing nothing."
+    } || {
+      echo
+      cat_indented "$TMPTOIMPORT"
+
+      echo "Importing commits from $url into subdir $fn of monorepo."
+      # using --stdin to strictly serialize and have a single error to catch
+      # vs using xargs. Helps prevent shenanigans with xargs running multiple
+      # processes, nuances in how it returns error status etc.
+      #
+      # TODO: any advantages to doing git format-patch | git am like with
+      # exporting commits. This is significantly easier, probably more reliable too?
+      #tac "$TMPTOIMPORT" | \
+      #  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+      apply_subrepo_commits_to_monorepo "$fn" "$TMPTOIMPORT"
+    }
+  done
 
   echo "Done."
 
