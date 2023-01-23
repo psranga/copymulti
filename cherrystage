@@ -433,7 +433,7 @@ apply_monocommits_to_staged_subrepo () {
     local TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${br}.${fn}.${commitid}.XXXXXX")
     local TMPLOGMSG=$(mktemp "$(stagingtmpdir)/logmsg.${br}.${fn}.${commitid}.XXXXX")
     # -n +2 removes the first "commit <id>" line.
-    git -C "$monogitdir" rev-list --pretty='format:%B' "${commitid}^..${commitid}" | \
+    git -C "$monogitdir" rev-list --pretty='format:%B' -n 1 "${commitid}" | \
       tail -n +2 > "$TMPLOGMSG"
     echo >> "$TMPLOGMSG"
     echo >> "$TMPLOGMSG" "(from cherrystaged monocommit $commitid for fbranch $br)"
@@ -636,12 +636,15 @@ git_log_cherryremotes_not_main () {
 }
 
 git_log_grep_imported_commits () {
-  local MSGNEEDLE="cherry picked from commit"
+  local url="$1"
+  local fn=$(url_to_reponame "$url")
+  local MSGNEEDLE="cherry picked from commit subrepos/$fn/[0-9a-f]+"
   local mainbr="$(find_main_branch_of_monorepo)"
 
   # extract the commitid alone from suffixes added by git-cherry-pick -x
-  #   (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
-  git log --no-merges --grep="$MSGNEEDLE" "$mainbr" | grep "$MSGNEEDLE" | egrep -o '[0-9a-z]+\)$' | tr -d ')' | tac
+  #   (cherry picked from commit subrepos/a/bdc469cded1a72d1359f8edfdf8546b027a5267c)
+  git log --no-merges --extended-regexp --grep="$MSGNEEDLE" "$mainbr" | \
+    egrep "$MSGNEEDLE" | egrep -o '/[0-9a-f]+' | tr -c -d '[:xdigit:]\n' | tac
 }
 
 cherryremote_main_commits_absent_in_main_branch () {
@@ -649,10 +652,13 @@ cherryremote_main_commits_absent_in_main_branch () {
   # python program does set difference (first-second) *and also* outputs
   # the elemts in the relative order as in the first file. Too baroque to
   # to this using awk etc (we can't do comm -23, it needs sorted inputs).
-  git_log_cherryremotes_not_main "$url" | tee "$(stagingtmpdir)/seta"
-  git_log_grep_imported_commits "$url" | tee "$(stagingtmpdir)/setb"
+  TMPSETA="$(stagingtmpdir)/seta.$fn"
+  TMPSETB="$(stagingtmpdir)/setb.$fn"
+  TMPSETC="$(stagingtmpdir)/setc.$fn"
   python3 $MYDIR/must-cherry-pick.py \
-    <(git_log_cherryremotes_not_main "$url") <(git_log_grep_imported_commits "$url")
+    <(git_log_cherryremotes_not_main "$url" | tee "$TMPSETA") \
+    <(git_log_grep_imported_commits "$url" | tee "$TMPSETB") \
+    | tee "$TMPSETC"
 }
 
 cherry_sync_unused () {
@@ -726,8 +732,10 @@ cherry_sync_unused () {
 
 # all git commands run under monodir.
 apply_subrepo_commits_to_monorepo () {
-  local fn="$1"
+  local url="$1"
   local ifile="$2"
+  local fn=$(url_to_reponame "$url")
+  local gitdir=$(reponame_to_stagingrepodir "$fn")
 
   echo "apply_subrepo_commits_to_monorepo: running in $(pwd)"
   echo "Applying $(lines_in_file "$ifile") subrepo commits from $ifile into directory $fn"
@@ -740,14 +748,14 @@ apply_subrepo_commits_to_monorepo () {
     local TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${fn}.${commitid}.XXXXXX")
     local TMPLOGMSG=$(mktemp "$(stagingtmpdir)/logmsg.${fn}.${commitid}.XXXXX")
     # -n +2 removes the first "commit <id>" line.
-    git rev-list --pretty='format:%B' "${commitid}^..${commitid}" | \
+    git -C "$gitdir" rev-list --pretty='format:%B' -n 1 "${commitid}" | \
       tail -n +2 > "$TMPLOGMSG"
     echo >> "$TMPLOGMSG"
-    # (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
-    echo >> "$TMPLOGMSG" "(cherry picked from commit $commitid)"
+    # (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c reponame a)
+    echo >> "$TMPLOGMSG" "(cherry picked from commit subrepos/$fn/$commitid)"
 
     # Generate the patch.
-    git format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
+    git -C "$gitdir" format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
       > "$TMPPATCH"
 
     echo "Patch is in: $TMPPATCH"
@@ -756,28 +764,39 @@ apply_subrepo_commits_to_monorepo () {
     cat_indented "$TMPPATCH"
 
     # Apply the patch.
-    cat "$TMPPATCH" | git am --directory="$fn" && {
+    local patch_ok=0
+    cat "$TMPPATCH" | git am --reject --directory="$fn" && {
       echo "Success! Imported subrepo commit $commitid into subdir $fn."
+      patch_ok=1
     } || {
       echo "Error import subrepo commit ${commitid} into subdir $fn."
-      echo "Cleaning git am to continue to next commits."
-      git am --abort
-      false; return 1;
-      break
+      echo "Checking if NOP patch."
+      has_pending_changes && {
+        echo "Cleaning git am to continue to next commits."
+        git am --abort
+        false; return 1;
+        break
+      } || {
+        echo "Skipping this commit, and adding an empty commit instead."
+        git am --skip
+        git commit --allow-empty -m "skipped ocommit $commitid"
+        patch_ok=2
+      }
     }
 
     # Link imported commit with monocommit via suffix in commit message (like git cherry-pick -x).
-    git commit --amend -F "$TMPLOGMSG" && {
+    git commit --allow-empty --amend -F "$TMPLOGMSG" && {
       echo "Edited commit message to link imported subrepo commit $commitid to its monocommit."
       (( nsuccess = nsuccess + 1 ))
     } || {
       echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
+      false;
       continue
     }
 
     #rm "$TMPPATCH" "$TMPLOGMSG"
   done < "$ifile"
-  echo "apply_subrepo_commits_to_monorepo: ntot: $ntot nsuccess: $nsuccess"
+  echo "apply_subrepo_commits...: ntot: $ntot nsuccess: $nsuccess reponame: $fn"
 }
 
 cherry_sync () {
@@ -854,7 +873,7 @@ cherry_sync () {
       # exporting commits. This is significantly easier, probably more reliable too?
       #tac "$TMPTOIMPORT" | \
       #  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
-      [[ "$dry_run" = "0" ]] && apply_subrepo_commits_to_monorepo "$fn" "$TMPTOIMPORT"
+      [[ "$dry_run" = "0" ]] && apply_subrepo_commits_to_monorepo "$url" "$TMPTOIMPORT"
     }
   done
 
