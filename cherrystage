@@ -64,7 +64,7 @@ find_cherryremote_main_branch_for_url () {
 all_cherryremote_main_branches () {
   # sort and uniq to remove dups due to lines like remote/xx/HEAD -> remote/xx/main
   # followed by a line remote/xx/main by itself.
-  git branch -r | grep cherryremote_ | egrep -o "$remotename/(main|master)" | sort | uniq
+  git branch -r | grep cherryremote_ | egrep -o "cherryremote_[^/]+/(main|master)" | sort | uniq
 }
 
 has_pending_changes () {
@@ -310,8 +310,12 @@ reset_to_branch_in_staged_subrepo () {
   gitdir_subrepo_origin_has_branch "$gitdir" "$br" || {
     echo "Starting tracked local branch $br in subrepo $url at origin's HEAD (gitdir: $gitdir)";
     git -C "$gitdir" checkout -f -B "$br" "subrepo_actual_origin/HEAD"
-    echo "Pushing local branch $br in subrepo $url to its origin (gitdir: $gitdir)";
-    git -C "$gitdir" push -u -f "subrepo_actual_origin" "$br"
+    [[ "$br" != "$mainbr" ]] && {
+      echo "Force pushing local feature branch $br in subrepo $url to its origin (gitdir: $gitdir)";
+      git -C "$gitdir" push -u -f "subrepo_actual_origin" "$br"
+    } || {
+      echo "Not force pushing local main branch $br for subrepo $url from staged version."
+    }
   }
 
   echo "Checking out origin branch from subrepo $url as local branch (gitdir: $gitdir)";
@@ -365,12 +369,14 @@ fetch_all_staged_subrepos () {
 }
 
 fast_forward_current_branch_in_all_staged_subrepos () {
+  set -e; set -x
   local url=""
   for url in $(all_subrepo_urls); do
     local fn=$(url_to_reponame "$url")
     local gitdir=$(reponame_to_stagingrepodir "$fn")
     git -C "$gitdir" pull --quiet --ff-only "subrepo_actual_origin"
   done
+  set +e; set +x
 }
 
 # ======================================
@@ -670,7 +676,7 @@ cherry_sync () {
     echo "Nothing to cherry pick. Doing nothing."
   } || {
     echo
-    cat_indented "$TMPTOIMPORT"
+    cat_indented <(tac "$TMPTOIMPORT")
 
     echo "Cherry-picking commits to be imported from cherryremotes to monorepo."
     # using --stdin to strictly serialize and have a single error to catch
@@ -679,8 +685,8 @@ cherry_sync () {
     #
     # TODO: any advantages to doing git format-patch | git am like with
     # exporting commits. This is significantly easier, probably more reliable too?
-    tac "$TMPTOIMPORT" | \
-      git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+    #tac "$TMPTOIMPORT" | \
+    #  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
   }
 
   echo "Done."
