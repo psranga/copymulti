@@ -367,7 +367,7 @@ fast_forward_current_branch_in_all_staged_subrepos () {
   for url in $(all_subrepo_urls); do
     fn=$(url_to_reponame "$url")
     gitdir=$(reponame_to_stagingrepodir "$fn")
-    git -C "$gitdir" pull --ff-only "subrepo_actual_origin"
+    git -C "$gitdir" pull --quiet --ff-only "subrepo_actual_origin"
   done
 }
 
@@ -504,6 +504,8 @@ cherry_stage () {
 }
 
 cherry_add () {
+  set -e; set -x
+
   is_within_monodir || {
     echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
     return 1;
@@ -527,7 +529,7 @@ cherry_add () {
   echo "OK. Setting up subrepos."
 
   for url in $*; do
-    fn=($url_to_reponame "$url")
+    fn=$(url_to_reponame "$url")
     gitdir=$(reponame_to_stagingrepodir "$fn")
     remotename=$(url_to_remotename "$url")
 
@@ -536,10 +538,13 @@ cherry_add () {
       git remote remove "$remotename"
     }
 
+    echo "Adding remote and fetching ($url)"
     git remote add "$remotename" "$url"
     git fetch "$remotename"
     # TODO: cherry-pick the commits from remote into my tree.
   done
+
+  set +e; set +x
 }
 
 cherry_rm () {
@@ -564,7 +569,7 @@ cherry_rm () {
   }
 
   for url in $*; do
-    fn=($url_to_reponame "$url")
+    fn=$(url_to_reponame "$url")
     gitdir=$(reponame_to_stagingrepodir "$fn")
     remotename=$(url_to_remotename "$url")
 
@@ -613,6 +618,8 @@ cherryremote_main_commits_absent_in_main_branch () {
 }
 
 cherry_sync () {
+  set -e; set -x
+
   is_within_monodir || {
     echo "Switch to the monodir (dir 00MONO is absent) and rerun this command.";
     return 1;
@@ -651,17 +658,30 @@ cherry_sync () {
   echo "Computing unsync'd commits and saving in $TMPTOIMPORT"
   cherryremote_main_commits_absent_in_main_branch > "$TMPTOIMPORT"
 
+  num_commits=$(lines_in_file "$TMPTOIMPORT")
   echo
-  echo "Found $(lines_in_file "$TMPTOIMPORT") commits."
-  echo
-  cat_indented "$TMPTOIMPORT"
+  echo "Need to cherry pick $num_commits commits across all cherryremotes."
 
-  echo "Cherry-picking commits to be imported from cherryremotes to monorepo:"
-  # using --stdin to strictly serialize and have a single error to catch
-  # vs using xargs. Helps prevent shenanigans with xargs running multiple
-  # processes, nuances in how it returns error status etc.
-  #tac "$TMPTOIMPORT" | \
-  #  git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+  [[ "$num_commits" -le 0 ]] && {
+    echo "Nothing to cherry pick. Doing nothing."
+  } || {
+    echo
+    cat_indented "$TMPTOIMPORT"
+
+    echo "Cherry-picking commits to be imported from cherryremotes to monorepo."
+    # using --stdin to strictly serialize and have a single error to catch
+    # vs using xargs. Helps prevent shenanigans with xargs running multiple
+    # processes, nuances in how it returns error status etc.
+    #
+    # TODO: any advantages to doing git format-patch | git am like with
+    # exporting commits. This is significantly easier, probably more reliable too?
+    tac "$TMPTOIMPORT" | \
+      git cherry-pick -x --allow-empty --allow-empty-message --keep-redundant-commits --stdin
+  }
+
+  echo "Done."
 
   #rm "$TMPTOIMPORT"
+
+  set +e; set +x
 }
