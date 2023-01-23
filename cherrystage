@@ -392,7 +392,8 @@ monocommits_to_stage_for_subrepo () {
   local br="$2"
 
   git -C "$(monodir)" rev-list --grep="cherry picked from commit" --invert-grep \
-    "$br" ^$(remotename_of_subrepo "$url") -- $(url_to_reponame "$url")
+    "$br" "^$(find_cherryremote_main_branch_for_url "$url")" -- $(url_to_reponame "$url") \
+    | tac
 }
 
 write_monocommits_to_stage_for_subrepo () {
@@ -427,6 +428,7 @@ apply_monocommits_to_staged_subrepo () {
 
     # Generate the patch.
     git -C "$monogitdir" format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
+      | filterdiff -i "a/$fn/*" -i "b/$fn/*" \
       > "$TMPPATCH"
 
     echo "Patch is in: $TMPPATCH"
@@ -435,18 +437,18 @@ apply_monocommits_to_staged_subrepo () {
     cat_indented "$TMPPATCH"
 
     # Apply the patch.
-    cat "$TMPPATCH" | git -C "$gitdir" am --include "$fn/*" && {
+    cat "$TMPPATCH" | git -C "$gitdir" apply --index -p2 && {
       # TODO: check that the HEAD in the dir is actually different from before.
       echo "Success! Applied monocommit $commitid fbranch $br onto staged subrepo $url (gitdir: $gitdir)"
     } || {
       echo "Error applying commit: ${commitid} onto staged subrepo $url (gitdir: $gitdir)"
-      echo "Cleaning git am to continue to next commits."
-      git -C "$gitdir" am --abort
+      #echo "Cleaning git am to continue to next commits."
+      #git -C "$gitdir" am --abort
       continue
     }
 
     # Link staged commit with monocommit via suffix in commit message (like git cherry-pick -x).
-    git -C "$gitdir" commit --amend -F "$TMPLOGMSG" && {
+    git -C "$gitdir" commit -F "$TMPLOGMSG" && {
       echo "Edited commit message to link the staged commit to monocommit $commitid in subrepo $url branch $br (gitdir: $gitdir)"
     } || {
       echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
@@ -462,6 +464,8 @@ apply_monocommits_to_staged_subrepo () {
 # apply commits in mono repo to staged subrepos.
 # monocommits affecting multiple subrepos are split.
 cherry_stage () {
+  local dry_run=0
+  [[ "$1" = "-n" ]] && dry_run=1
   local MYBRANCH=$(current_branch)
 
   is_within_monodir || {
@@ -508,7 +512,12 @@ cherry_stage () {
     cat_indented "$TMPTODOCOMMITS"
 
     # By this time, we should have done 'git fetch' on the staged repos.
-    apply_monocommits_to_staged_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS"
+    [[ "$dry_run" -ne "1" ]] && {
+      apply_monocommits_to_staged_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS"
+    } || {
+      echo "Dry run ($dry_run) in $(pwd):"
+      echo apply_monocommits_to_staged_subrepo "$url" "$MYBRANCH" "$TMPTODOCOMMITS"
+    }
   done
 }
 
@@ -701,10 +710,12 @@ cherry_sync_unused () {
   set +e; set +x
 }
 
+# all git commands run under monodir.
 apply_subrepo_commits_to_monorepo () {
   local fn="$1"
   local ifile="$2"
 
+  echo "apply_subrepo_commits_to_monorepo: running in $(pwd)"
   echo "Applying $(lines_in_file "$ifile") subrepo commits into directory $fn"
   while read -r commitid; do
     echo;
@@ -712,14 +723,14 @@ apply_subrepo_commits_to_monorepo () {
     local TMPPATCH=$(mktemp "$(stagingtmpdir)/patch.${fn}.${commitid}.XXXXXX")
     local TMPLOGMSG=$(mktemp "$(stagingtmpdir)/logmsg.${fn}.${commitid}.XXXXX")
     # -n +2 removes the first "commit <id>" line.
-    git -C "$monogitdir" rev-list --pretty='format:%B' "${commitid}^..${commitid}" | \
+    git rev-list --pretty='format:%B' "${commitid}^..${commitid}" | \
       tail -n +2 > "$TMPLOGMSG"
     echo >> "$TMPLOGMSG"
     # (cherry picked from commit bdc469cded1a72d1359f8edfdf8546b027a5267c)
     echo >> "$TMPLOGMSG" "(cherry picked from commit $commitid)"
 
     # Generate the patch.
-    git -C "$monogitdir" format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
+    git format-patch --always --no-renames -B --minimal --stdout -p -1 "$commitid" \
       > "$TMPPATCH"
 
     echo "Patch is in: $TMPPATCH"
@@ -728,17 +739,17 @@ apply_subrepo_commits_to_monorepo () {
     cat_indented "$TMPPATCH"
 
     # Apply the patch.
-    cat "$TMPPATCH" | git -C "$gitdir" am --directory="$fn" && {
+    cat "$TMPPATCH" | git am --directory="$fn" && {
       echo "Success! Imported subrepo commit $commitid into subdir $fn."
     } || {
       echo "Error import subrepo commit ${commitid} into subdir $fn."
       echo "Cleaning git am to continue to next commits."
-      git -C "$gitdir" am --abort
+      git am --abort
       continue
     }
 
     # Link imported commit with monocommit via suffix in commit message (like git cherry-pick -x).
-    git -C "$gitdir" commit --amend -F "$TMPLOGMSG" && {
+    git commit --amend -F "$TMPLOGMSG" && {
       echo "Edited commit message to link imported subrepo commit $commitid to its monocommit."
     } || {
       echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
