@@ -769,25 +769,42 @@ apply_subrepo_commits_to_monorepo () {
       echo "Success! Imported subrepo commit $commitid into subdir $fn."
       patch_ok=1
     } || {
-      echo "Error import subrepo commit ${commitid} into subdir $fn."
-      echo "Checking if NOP patch."
+      echo "Error from git-am for subrepo commit ${commitid} into subdir $fn."
       has_pending_changes && {
-        echo "Cleaning git am to continue to next commits."
-        git am --abort
-        false; return 1;
-        break
-      } || {
-        echo "Skipping this commit, and adding an empty commit instead."
-        git am --skip
-        git commit --allow-empty -m "skipped ocommit $commitid"
+        echo "Errors in git-am and there are pending changes. Optimistically assuming commit's other changes are already present."
+        echo "i.e., rejecting hypothesis we're so borked that valid patches didn't apply."
+        local msgsuffix="(warning: partial import. pending pending changes after importing subrepo commit $commitid repo $fn)"
+        echo "$msgsuffix" >> "$TMPLOGMSG"
         patch_ok=2
+        #echo "Bailing with unclean index. Use git am --abort and rerun this command."
+        #git am --abort
+        echo "Committing partial patch. git-ls-files + git-add + git-am continue";
+        git ls-files -z -m -d | xargs -0 git add
+        git am --continue
+        #false; return 1; break
+      } || {
+        echo "Errors in git-am but no pending changes. Optimistically assuming commit's changes already present."
+        echo "i.e., rejecting hypothesis we're so borked that valid patches didn't apply."
+        echo "Skipping this commit, and adding an empty commit instead."
+        #git am --skip
+        local msgsuffix="(warning: nop import. no pending changes after importing subrepo commit $commitid repo $fn)"
+        echo "$msgsuffix" >> "$TMPLOGMSG"
+        git am --skip
+        git commit --allow-empty -C "$commitid"
+        patch_ok=3
+        #false; return 1; break
       }
     }
 
     # Link imported commit with monocommit via suffix in commit message (like git cherry-pick -x).
+    echo "Amending imported commit's log message."
     git commit --allow-empty --amend -F "$TMPLOGMSG" && {
       echo "Edited commit message to link imported subrepo commit $commitid to its monocommit."
-      (( nsuccess = nsuccess + 1 ))
+      (( patch_ok != 1 )) && {
+        false; echo "Break. Try cherry_sync 1."; return 1;
+      } || {
+        (( nsuccess = nsuccess + 1 ))
+      }
     } || {
       echo "Error editing commit message for monocommit ${commitid} in staged subrepo $url (gitdir: $gitdir)"
       false;
